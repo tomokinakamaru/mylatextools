@@ -1,0 +1,507 @@
+#!/usr/bin/env python3
+
+# main_tex = 'main.tex'
+
+# main_bib = 'main.bib'
+
+# system ----------------------------------------------------------------------
+from argparse import ArgumentParser
+from argparse import HelpFormatter
+from argparse import SUPPRESS
+from functools import wraps
+from inspect import getsource
+from inspect import signature
+from os import makedirs
+from pathlib import Path
+from subprocess import CalledProcessError
+from subprocess import run
+from textwrap import dedent
+from urllib.request import urlopen
+
+
+def if_not_defined(f):
+    return globals().get(f.__name__, f)
+
+
+@if_not_defined
+def command_build(*paths):
+    """build .tex files"""
+    for path in paths or [main_tex]:
+        exec_container('latexmk', path)
+
+
+@if_not_defined
+def command_clean(*paths):
+    """clean build artifacts"""
+    for path in paths or [main_tex]:
+        exec_container('latexmk', '-C', path)
+
+
+@if_not_defined
+def command_detex(*paths):
+    """detex .tex files"""
+    for path in paths or [main_tex]:
+        p = docker(
+            'run', '--volume', f'{script_dir}:/workdir',
+            '--rm', '--interactive', '--tty',
+            'tomokinakamaru/detex', path
+        )
+        print(p.stdout.decode())
+
+
+@if_not_defined
+def command_bibtefmt(*paths):
+    """format .bib files"""
+    for path in paths or [main_bib]:
+        docker(
+            'run', '--volume', f'{script_dir}:/workdir',
+            '--rm', '--interactive', '--tty',
+            'tomokinakamaru/bibtefmt', path
+        )
+
+
+@if_not_defined
+def command_setup(type='pdflatex'):
+    """create all files"""
+    command_main_tex()
+    command_main_bib()
+    command_gitignore()
+    command_latexmkrc(type)
+    command_detexrc()
+    command_vsc_settings()
+    command_vsc_tasks()
+
+
+@if_not_defined
+def command_main_tex():  # main.tex
+    """create main.tex"""
+    return r"""
+    \documentclass{article}
+    \usepackage{algorithm}
+    \usepackage{algpseudocode}
+    \usepackage{amsmath}
+    \usepackage{balance}
+    \usepackage[backend=biber]{biblatex}
+    \usepackage{booktabs}
+    \usepackage{cleveref}
+    \usepackage{color}
+    \usepackage{enumitem}
+    \usepackage[pass]{geometry}
+    \usepackage{listings}
+    \usepackage{lstautogobble}
+    \usepackage{subcaption}
+    \usepackage{xurl}
+
+    % japanese ---------------------------------------------------------------------
+    \usepackage[whole]{bxcjkjatype}
+
+    % algorithm --------------------------------------------------------------------
+    \newfloat{algorithm}{t}{lop}
+    \algrenewcommand\algorithmicrequire{\textbf{Input:}}
+    \algrenewcommand\algorithmicensure{\textbf{Output:}}
+
+    % biblatex ---------------------------------------------------------------------
+    \addbibresource{main.bib}
+
+    % geometry ---------------------------------------------------------------------
+    \geometry{showframe}
+
+    % lstlisting -------------------------------------------------------------------
+    \lstset{
+    autogobble=true,
+    basicstyle=\tt,
+    escapeinside={~}{~},
+    showstringspaces=false,
+    upquote=true,
+    }
+
+    \lstdefinelanguage{Foo}{
+    morekeywords=[1]{begin, end},
+    morecomment=[l]{//},
+    morecomment=[l]{\%},
+    morecomment=[s]{/*}{*/},
+    morestring = [b]{"}
+    }
+    \lstnewenvironment{foo}{\lstset{language=Foo}}{}
+
+    \lstdefinestyle{Java}{
+    commentstyle=\color[rgb]{0.25,0.5,0.35},
+    keywordstyle=\color[rgb]{0.5,0,0.35},
+    stringstyle=\color[rgb]{0.6,0,0},
+    language=Java,
+    }
+    \lstnewenvironment{java}{\lstset{language=Java, style=Java}}{}
+
+    % url style --------------------------------------------------------------------
+    \urlstyle{same}
+
+    % document ---------------------------------------------------------------------
+    \begin{document}
+    \section{Lorem Ipsum}
+    Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nullam nec dapibus diam.
+
+    私は日本人なので日本語の方が論文を書きやすいです。
+
+    \begin{java}
+    // Class definition
+    public class Foo {}
+    \end{java}
+
+    \begin{foo}
+    begin
+        // Foo bar baz
+    end
+    \end{foo}
+
+    \printbibliography
+    \end{document}
+    """
+
+
+@if_not_defined
+def command_main_bib():  # main.bib
+    """create main.bib"""
+    return """
+    @misc{misc,
+        author = "U. N. Known",
+        title  = "Foo bar baz"
+    }
+    """
+
+
+@if_not_defined
+def command_gitignore():  # .gitignore
+    """create .gitignore"""
+    with urlopen(gitignore_url) as r:
+        return r.read().decode()
+
+
+@if_not_defined
+def command_latexmkrc(type='pdflatex'):  # latexmkrc
+    """create latexmkrc"""
+    if type == 'pdflatex':
+        return f"""
+        #!/usr/bin/env perl
+        @default_files = ('{main_tex}');
+        $clean_ext = 'synctex.gz synctex.gz(busy) run.xml tex.bak bbl bcf fdb_latexmk run tdo %R-blx.bib';
+        $bibtex = 'biber';
+        $pdflatex = 'pdflatex -interaction=batchmode -halt-on-error %O %S';
+        $pdf_mode = 1;
+        """
+
+    if type == 'platex':
+        return f"""
+        #!/usr/bin/env perl
+        @default_files = ('{main_tex}');
+        $clean_ext = 'synctex.gz synctex.gz(busy) run.xml tex.bak bbl bcf fdb_latexmk run tdo %R-blx.bib';
+        $dvipdf = 'dvipdfmx %O -o %D %S';
+        $latex = 'platex -interaction=nonstopmode -halt-on-error %O %S';
+        $pdf_mode = 3;
+        """
+
+    raise Exception(f'unknown type: {type}')
+
+
+@if_not_defined
+def command_detexrc():  # detexrc
+    """create detexrc"""
+    return r"""
+    #!/usr/bin/env python3
+    from detex import detex
+
+
+    @detex('document', 'textsc')
+    def identity(text):
+        return text
+
+
+    def texttt(text):
+        return '"CODE"'
+
+
+    @detex('$')
+    def math(text):
+        return '"Math"'
+
+
+    @detex('chapter*', 'chapter')
+    def chapter(text):
+        return f'\n1. {text}\n'
+
+
+    @detex('section*', 'section')
+    def section(text):
+        return f'\n1.1. {text}\n'
+
+
+    @detex('cref', 'Cref')
+    def cref(text):
+        return 'Reference 1'
+    """
+
+
+@if_not_defined
+def command_vsc_settings():  # .vscode/settings.json
+    """create .vscode/settings.json"""
+    return """
+    {
+        "[latex]": {
+            "editor.fontFamily": "Noto Sans CJK JP DemiLight",
+            "editor.fontSize": 14,
+            "editor.rulers": [],
+            "editor.scrollBeyondLastLine": true,
+            "editor.tabSize": 2,
+            "editor.wordWrap": "wordWrapColumn",
+            "editor.wordWrapColumn": 80,
+            "editor.wrappingIndent": "same"
+        },
+    }
+    """
+
+
+@if_not_defined
+def command_vsc_tasks():  # .vscode/tasks.json
+    """create .vscode/tasks.json"""
+    return """
+    {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "mylatextools",
+                "type": "shell",
+                "command": "${workspaceFolder}/mylatextools",
+                "args": ["build"],
+                "presentation": {
+                    "panel": "dedicated"
+                },
+                "group": {
+                    "kind": "build",
+                    "isDefault": true
+                }
+            }
+        ]
+    }
+    """
+
+
+@if_not_defined
+def command_update():
+    """update mylatextools"""
+    code = get_user_code() + get_latest_system_code()
+    with open(__file__, 'w') as f:
+        f.write(code)
+
+
+@if_not_defined
+def call(*args):
+    try:
+        return run(args, check=True, capture_output=True)
+    except CalledProcessError as e:
+        print('# stdout begin ---------------')
+        print(e.stdout.decode())
+        print('# stdout end -----------------')
+        print('# stderr begin ---------------')
+        print(e.stderr.decode())
+        print('# stderr end -----------------')
+        raise e
+
+
+@if_not_defined
+def docker(*args):
+    args = ['docker'] + [a for a in args if a]
+    return call(*args)
+
+
+@if_not_defined
+def find_container(all):
+    p = docker(
+        'ps', '--all' if all else '',
+        '--filter', f'name=^{container_name}$',
+        '--format', '{{.Names}}'
+    )
+    return bool(p.stdout.strip())
+
+
+@if_not_defined
+def create_container():
+    if not find_container(True):
+        docker(
+            'create', '--name', container_name,
+            '--volume', f'{script_dir}:{container_workdir}',
+            '--workdir', container_workdir,
+            '--tty', docker_image
+        )
+
+
+@if_not_defined
+def start_container():
+    create_container()
+    if not find_container(False):
+        docker('start', container_name)
+
+
+@if_not_defined
+def exec_container(*args):
+    start_container()
+    docker('exec', '--interactive', '--tty', container_name, *args)
+
+
+@if_not_defined
+def kill_container():
+    if find_container(False):
+        docker('kill', container_name)
+
+
+@if_not_defined
+def remove_container():
+    kill_container()
+    if find_container(True):
+        docker('rm', container_name)
+
+
+@if_not_defined
+def get_user_code():
+    with open(__file__) as f:
+        code = f.read()
+        return code[:code.index(code_separator)]
+
+
+@if_not_defined
+def get_latest_system_code():
+    with urlopen(mylatextools_url) as r:
+        code = r.read().decode()
+        return code[code.index(code_separator):]
+
+
+@if_not_defined
+def main():
+    parser = create_argparser()
+    args = vars(parser.parse_args())
+    if command_main_name in args:
+        func = args.pop(command_main_name)
+        pargs, kargs = [], {}
+        for k, v in args.items():
+            if isinstance(v, list):
+                pargs.extend(v)
+            else:
+                kargs[k] = v
+        func(*pargs, **kargs)
+    else:
+        parser.print_help()
+
+
+@if_not_defined
+def create_argparser():
+    parser = ArgumentParser(formatter_class=lambda prog: Formatter(prog))
+    ps = parser.add_subparsers(metavar='<command>')
+    for func in find_commands():
+        n = func.__name__[len(command_func_prefix):].replace('_', '-')
+        p = ps.add_parser(n, help=func.__doc__)
+        build_parser(p, func)
+    return parser
+
+
+@if_not_defined
+def build_parser(parser, func):
+    sig = signature(func)
+    for k, v in sig.parameters.items():
+        if v.kind in (v.POSITIONAL_ONLY, v.POSITIONAL_OR_KEYWORD):
+            if v.default is v.empty:
+                parser.add_argument(k)
+            else:
+                parser.add_argument(f'--{k}', default=v.default)
+        elif v.kind == v.VAR_POSITIONAL:
+            parser.add_argument(k, nargs='*')
+        elif v.kind == v.KEYWORD_ONLY:
+            parser.add_argument(f'--{k}')
+        else:
+            raise Exception()
+    parser.set_defaults(**{command_main_name: func})
+
+
+@if_not_defined
+def get_config(name, val):
+    return globals().get(name, val)
+
+
+@if_not_defined
+def update_file_commands():
+    funcs = {}
+    for f in find_commands():
+        path = get_file_command_path(f)
+        if path:
+            funcs[f.__name__] = create_file_command(path, f)
+    globals().update(funcs)
+
+
+@if_not_defined
+def get_file_command_path(func):
+    lines = getsource(func.__code__).splitlines()
+    head = next(l for l in lines if l.startswith('def '))
+    return Path(head.split('#')[1].strip()) if '#' in head else None
+
+
+@if_not_defined
+def create_file_command(path, func):
+    @wraps(func)
+    def _(*args, **kwargs):
+        if not path.exists():
+            text = dedent(func(*args, **kwargs)).strip()
+            if path.parent:
+                makedirs(path.parent, exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(text)
+                f.write('\n')
+    return _
+
+
+@if_not_defined
+def find_commands():
+    for k, v in globals().items():
+        if k.startswith(command_func_prefix) and callable(v):
+            yield v
+
+
+# https://stackoverflow.com/questions/32888815/max-help-position-is-not-works-in-python-argparse-library
+class Formatter(HelpFormatter):
+    def add_argument(self, action):
+        if action.help is not SUPPRESS:
+            get_invocation = self._format_action_invocation
+            invocations = [get_invocation(action)]
+            current_indent = self._current_indent
+            for subaction in self._iter_indented_subactions(action):
+                indent_chg = self._current_indent - current_indent
+                added_indent = 'x'*indent_chg
+                invocations.append(added_indent+get_invocation(subaction))
+            invocation_length = max([len(s) for s in invocations])
+            action_length = invocation_length + self._current_indent
+            self._action_max_length = max(self._action_max_length, action_length)
+            self._add_item(self._format_action, [action])
+
+
+mylatextools_url = 'https://raw.githubusercontent.com/tomokinakamaru/mylatextools/main/mylatextools'
+
+code_separator = '# system ' + '-' * 70
+
+gitignore_url = 'https://raw.githubusercontent.com/github/gitignore/main/TeX.gitignore'
+
+script_dir = Path(__file__).parent
+
+container_workdir = '/workdir'
+
+command_func_prefix = 'command_'
+
+command_main_name = '__main__'
+
+main_tex = get_config('main_tex', 'main.tex')
+
+main_bib = get_config('main_bib', 'main.bib')
+
+docker_image = get_config('docker_image', 'texlive/texlive:latest')
+
+container_name = get_config('container_name', f'paper-{script_dir.name}')
+
+update_file_commands()
+
+if __name__ == '__main__':
+    main()
